@@ -276,28 +276,33 @@
     function onResults(results) {
       if (loadingOverlay) loadingOverlay.style.display = 'none';
 
-      // 1. Draw mirrored webcam feed onto display canvas
+      const hasHand = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
+      const lm = hasHand ? results.multiHandLandmarks[0] : null;
+
+      // 1. Draw mirrored webcam feed AND mirrored skeleton TOGETHER inside mirror transform
       displayCtx.save();
       displayCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
       displayCtx.translate(displayCanvas.width, 0);
       displayCtx.scale(-1, 1);
       displayCtx.drawImage(results.image, 0, 0, displayCanvas.width, displayCanvas.height);
-      displayCtx.restore();
+
+      if (hasHand) {
+        // Drawing connectors inside the mirrored context locks them directly onto your hand!
+        drawConnectors(displayCtx, lm, HAND_CONNECTIONS, { color: 'rgba(255,255,255,0.4)', lineWidth: 2 });
+        drawLandmarks(displayCtx, lm, { color: 'rgba(239, 68, 68, 0.85)', radius: 3 });
+      }
+      displayCtx.restore(); // Restore back to normal screen coordinates for UI & strokes
 
       let mode = "STANDBY";
       let modeColor = "#94a3b8";
 
       if (btnCooldown > 0) btnCooldown--;
 
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const lm = results.multiHandLandmarks[0];
-
-        drawConnectors(displayCtx, lm, HAND_CONNECTIONS, { color: 'rgba(255,255,255,0.3)', lineWidth: 2 });
-        drawLandmarks(displayCtx, lm, { color: 'rgba(239, 68, 68, 0.7)', radius: 3 });
-
+      if (hasHand) {
         const indexOpen = isFingerExtended(lm, 5, 6, 8);
         const middleOpen = isMiddleExtended(lm);
 
+        // Mirrored coordinate calculation matching the mirrored video
         const rawX = (1 - lm[8].x) * displayCanvas.width;
         const rawY = lm[8].y * displayCanvas.height;
 
