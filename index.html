@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Air Drawing Studio - Touchless Computer Vision</title>
+  
+  <!-- MediaPipe Hands & Camera Utils CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    body {
+      background-color: #0f1117;
+      color: #ffffff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    header {
+      width: 100%;
+      background: #1a1d27;
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #2e3446;
+    }
+    .brand {
+      font-size: 1.2rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      background: #3b82f6;
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-radius: 9999px;
+      font-weight: 600;
+    }
+    #stage-container {
+      position: relative;
+      margin: 20px 0;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      border: 2px solid #2e3446;
+      background: #000;
+    }
+    video {
+      display: none;
+    }
+    canvas {
+      display: block;
+      max-width: 95vw;
+      max-height: 75vh;
+      object-fit: contain;
+    }
+    .instructions {
+      max-width: 800px;
+      width: 90%;
+      background: #1a1d27;
+      border: 1px solid #2e3446;
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+    .instruction-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .instruction-card .icon {
+      font-size: 1.8rem;
+    }
+    .instruction-card .text {
+      font-size: 0.85rem;
+      color: #94a3b8;
+    }
+    .instruction-card .text strong {
+      color: #ffffff;
+      display: block;
+      margin-bottom: 2px;
+    }
+    #loading-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 17, 23, 0.9);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+      z-index: 10;
+    }
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border: 4px solid #2e3446;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span>🎨 Air Drawing Studio</span>
+      <span class="badge">Web Edition</span>
+    </div>
+    <div style="font-size: 0.85rem; color: #94a3b8;">
+      Created by <strong>Georgin J.K.</strong>
+    </div>
+  </header>
+
+  <div id="stage-container">
+    <video id="webcam" playsinline></video>
+    <canvas id="output-canvas" width="640" height="480"></canvas>
+    
+    <div id="loading-overlay">
+      <div class="spinner"></div>
+      <p id="loading-status">Starting camera & AI model...</p>
+      <p style="font-size: 0.8rem; color: #94a3b8;">Please allow camera access when prompted!</p>
+    </div>
+  </div>
+
+  <div class="instructions">
+    <div class="instruction-card">
+      <div class="icon">☝️</div>
+      <div class="text">
+        <strong>1 Finger Extended</strong>
+        Draw or erase on the canvas
+      </div>
+    </div>
+    <div class="instruction-card">
+      <div class="icon">✌️</div>
+      <div class="text">
+        <strong>2 Fingers Extended</strong>
+        Hover / move without drawing
+      </div>
+    </div>
+    <div class="instruction-card">
+      <div class="icon">👆</div>
+      <div class="text">
+        <strong>Touch Top Toolbar</strong>
+        Pick colors, brush size, erase, or save
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('webcam');
+    const displayCanvas = document.getElementById('output-canvas');
+    const displayCtx = displayCanvas.getContext('2d');
+    const loadingOverlay = document.getElementById('loading-overlay');
+    const loadingStatus = document.getElementById('loading-status');
+
+    // Off-screen persistent drawing canvas
+    const persistentCanvas = document.createElement('canvas');
+    persistentCanvas.width = 640;
+    persistentCanvas.height = 480;
+    const persistentCtx = persistentCanvas.getContext('2d');
+
+    // Toolbar Buttons Setup
+    const TOOLBAR_HEIGHT = 65;
+    const BRUSH_SIZES = [4, 8, 14, 22];
+    let sizeIndex = 1;
+    let brushThickness = BRUSH_SIZES[sizeIndex];
+    let eraserThickness = 45;
+
+    const buttons = [
+      { name: "RED",    color: "#ff0000", type: "color" },
+      { name: "GREEN",  color: "#00ff00", type: "color" },
+      { name: "BLUE",   color: "#0088ff", type: "color" },
+      { name: "YELLOW", color: "#ffff00", type: "color" },
+      { name: "PURPLE", color: "#c026d3", type: "color" },
+      { name: "ORANGE", color: "#f97316", type: "color" },
+      { name: "SIZE",   color: "#475569", type: "size" },
+      { name: "ERASER", color: "#000000", type: "eraser" },
+      { name: "SAVE",   color: "#0284c7", type: "save" },
+      { name: "CLEAR",  color: "#dc2626", type: "clear" }
+    ];
+
+    // Compute button bounding boxes
+    const btnWidth = displayCanvas.width / buttons.length;
+    buttons.forEach((btn, idx) => {
+      btn.x1 = idx * btnWidth + 2;
+      btn.x2 = (idx + 1) * btnWidth - 2;
+    });
+
+    let currentColor = "#ffff00";
+    let currentToolName = "YELLOW";
+    let notificationText = "Air Drawing Ready!";
+    let notificationTimer = 90;
+    let btnCooldown = 0;
+
+    // Coordinate memory & smoothing
+    let prevX = null, prevY = null;
+    let smoothX = null, smoothY = null;
+    const SMOOTHING = 0.65;
+    let framesSinceDraw = 3;
+
+    // Vector Cosine Alignment check for finger extension
+    function isFingerExtended(lm, mcpIdx, pipIdx, tipIdx) {
+      const v1x = lm[pipIdx].x - lm[mcpIdx].x;
+      const v1y = lm[pipIdx].y - lm[mcpIdx].y;
+      const v2x = lm[tipIdx].x - lm[pipIdx].x;
+      const v2y = lm[tipIdx].y - lm[pipIdx].y;
+
+      const dot = v1x * v2x + v1y * v2y;
+      const mag1 = Math.hypot(v1x, v1y);
+      const mag2 = Math.hypot(v2x, v2y);
+      const cosAngle = (mag1 * mag2 > 0) ? (dot / (mag1 * mag2)) : 0;
+
+      const distTip = Math.hypot(lm[tipIdx].x - lm[mcpIdx].x, lm[tipIdx].y - lm[mcpIdx].y);
+      const distPip = Math.hypot(lm[pipIdx].x - lm[mcpIdx].x, lm[pipIdx].y - lm[mcpIdx].y);
+
+      return (cosAngle > 0.05) || (distTip > distPip * 1.05);
+    }
+
+    function isMiddleExtended(lm) {
+      const v1x = lm[10].x - lm[9].x;
+      const v1y = lm[10].y - lm[9].y;
+      const v2x = lm[12].x - lm[10].x;
+      const v2y = lm[12].y - lm[10].y;
+
+      const dot = v1x * v2x + v1y * v2y;
+      const mag1 = Math.hypot(v1x, v1y);
+      const mag2 = Math.hypot(v2x, v2y);
+      const cosAngle = (mag1 * mag2 > 0) ? (dot / (mag1 * mag2)) : 0;
+
+      const distTip = Math.hypot(lm[12].x - lm[9].x, lm[12].y - lm[9].y);
+      const distPip = Math.hypot(lm[10].x - lm[9].x, lm[10].y - lm[9].y);
+
+      return (cosAngle > 0.35) && (distTip > distPip * 1.3);
+    }
+
+    function saveArtwork() {
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = displayCanvas.width;
+      exportCanvas.height = displayCanvas.height;
+      const exportCtx = exportCanvas.getContext('2d');
+
+      exportCtx.fillStyle = '#ffffff';
+      exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+      exportCtx.drawImage(persistentCanvas, 0, 0);
+
+      const link = document.createElement('a');
+      link.download = `air_drawing_${Date.now()}.png`;
+      link.href = exportCanvas.toDataURL('image/png');
+      link.click();
+
+      notificationText = "Artwork downloaded to your device!";
+      notificationTimer = 90;
+    }
+
+    function onResults(results) {
+      if (loadingOverlay) loadingOverlay.style.display = 'none';
+
+      // 1. Draw mirrored webcam feed onto display canvas
+      displayCtx.save();
+      displayCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
+      displayCtx.translate(displayCanvas.width, 0);
+      displayCtx.scale(-1, 1);
+      displayCtx.drawImage(results.image, 0, 0, displayCanvas.width, displayCanvas.height);
+      displayCtx.restore();
+
+      let mode = "STANDBY";
+      let modeColor = "#94a3b8";
+
+      if (btnCooldown > 0) btnCooldown--;
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const lm = results.multiHandLandmarks[0];
+
+        drawConnectors(displayCtx, lm, HAND_CONNECTIONS, { color: 'rgba(255,255,255,0.3)', lineWidth: 2 });
+        drawLandmarks(displayCtx, lm, { color: 'rgba(239, 68, 68, 0.7)', radius: 3 });
+
+        const indexOpen = isFingerExtended(lm, 5, 6, 8);
+        const middleOpen = isMiddleExtended(lm);
+
+        const rawX = (1 - lm[8].x) * displayCanvas.width;
+        const rawY = lm[8].y * displayCanvas.height;
+
+        if (smoothX === null || smoothY === null) {
+          smoothX = rawX;
+          smoothY = rawY;
+        } else {
+          smoothX = SMOOTHING * rawX + (1 - SMOOTHING) * smoothX;
+          smoothY = SMOOTHING * rawY + (1 - SMOOTHING) * smoothY;
+        }
+
+        // TOOLBAR SELECTION
+        if (smoothY < TOOLBAR_HEIGHT) {
+          mode = "CHOOSING";
+          modeColor = "#eab308";
+          prevX = null;
+          prevY = null;
+
+          displayCtx.beginPath();
+          displayCtx.arc(smoothX, smoothY, 12, 0, 2 * Math.PI);
+          displayCtx.strokeStyle = "#ffffff";
+          displayCtx.lineWidth = 2;
+          displayCtx.stroke();
+
+          buttons.forEach(btn => {
+            if (smoothX >= btn.x1 && smoothX <= btn.x2 && btnCooldown === 0) {
+              if (btn.type === "color") {
+                currentColor = btn.color;
+                currentToolName = btn.name;
+                notificationText = `Color: ${btn.name}`;
+                notificationTimer = 45;
+              } else if (btn.type === "eraser") {
+                currentToolName = "ERASER";
+                notificationText = "Tool: ERASER";
+                notificationTimer = 45;
+              } else if (btn.type === "size") {
+                sizeIndex = (sizeIndex + 1) % BRUSH_SIZES.length;
+                brushThickness = BRUSH_SIZES[sizeIndex];
+                notificationText = `Brush Size: ${brushThickness}px`;
+                notificationTimer = 45;
+                btnCooldown = 15;
+              } else if (btn.type === "save") {
+                saveArtwork();
+                btnCooldown = 25;
+              } else if (btn.type === "clear") {
+                persistentCtx.clearRect(0, 0, persistentCanvas.width, persistentCanvas.height);
+                currentToolName = "YELLOW";
+                currentColor = "#ffff00";
+                notificationText = "Canvas Cleared!";
+                notificationTimer = 45;
+                btnCooldown = 15;
+              }
+            }
+          });
+        }
+        // DRAW / ERASE (1 Finger)
+        else if (indexOpen && !middleOpen) {
+          mode = (currentToolName === "ERASER") ? "ERASING" : "DRAWING";
+          modeColor = (currentToolName === "ERASER") ? "#38bdf8" : "#22c55e";
+          framesSinceDraw = 0;
+
+          const activeThick = (currentToolName === "ERASER") ? eraserThickness : brushThickness;
+
+          displayCtx.beginPath();
+          displayCtx.arc(smoothX, smoothY, activeThick / 2 + 2, 0, 2 * Math.PI);
+          displayCtx.fillStyle = (currentToolName === "ERASER") ? 'rgba(255,255,255,0.4)' : currentColor;
+          displayCtx.fill();
+          displayCtx.strokeStyle = "#ffffff";
+          displayCtx.lineWidth = 1.5;
+          displayCtx.stroke();
+
+          persistentCtx.lineWidth = activeThick;
+          persistentCtx.lineCap = 'round';
+          persistentCtx.lineJoin = 'round';
+
+          if (currentToolName === "ERASER") {
+            persistentCtx.globalCompositeOperation = 'destination-out';
+          } else {
+            persistentCtx.globalCompositeOperation = 'source-over';
+            persistentCtx.strokeStyle = currentColor;
+          }
+
+          if (prevX === null || prevY === null) {
+            prevX = smoothX;
+            prevY = smoothY;
+            persistentCtx.beginPath();
+            persistentCtx.arc(smoothX, smoothY, activeThick / 2, 0, 2 * Math.PI);
+            persistentCtx.fill();
+          } else {
+            const dist = Math.hypot(smoothX - prevX, smoothY - prevY);
+            if (dist < 180) {
+              persistentCtx.beginPath();
+              persistentCtx.moveTo(prevX, prevY);
+              persistentCtx.lineTo(smoothX, smoothY);
+              persistentCtx.stroke();
+            }
+            prevX = smoothX;
+            prevY = smoothY;
+          }
+          persistentCtx.globalCompositeOperation = 'source-over';
+        }
+        // HOVER (2 Fingers)
+        else if (indexOpen && middleOpen) {
+          mode = "HOVER (PEN UP)";
+          modeColor = "#f97316";
+          prevX = null;
+          prevY = null;
+          framesSinceDraw = 3;
+
+          displayCtx.beginPath();
+          displayCtx.arc(smoothX, smoothY, 15, 0, 2 * Math.PI);
+          displayCtx.strokeStyle = "#ffffff";
+          displayCtx.lineWidth = 2;
+          displayCtx.stroke();
+        }
+        else {
+          framesSinceDraw++;
+          if (framesSinceDraw >= 3) {
+            prevX = null;
+            prevY = null;
+          }
+        }
+      } else {
+        prevX = null;
+        prevY = null;
+        smoothX = null;
+        smoothY = null;
+      }
+
+      // 2. Overlay persistent drawing canvas
+      displayCtx.drawImage(persistentCanvas, 0, 0);
+
+      // 3. Render Top Toolbar
+      displayCtx.fillStyle = 'rgba(26, 29, 39, 0.95)';
+      displayCtx.fillRect(0, 0, displayCanvas.width, TOOLBAR_HEIGHT);
+      displayCtx.strokeStyle = '#2e3446';
+      displayCtx.lineWidth = 1;
+      displayCtx.strokeRect(0, 0, displayCanvas.width, TOOLBAR_HEIGHT);
+
+      buttons.forEach(btn => {
+        const isSelected = (btn.name === currentToolName);
+        displayCtx.fillStyle = btn.color;
+        displayCtx.fillRect(btn.x1, 8, btn.x2 - btn.x1, 50);
+
+        displayCtx.fillStyle = (btn.name === "YELLOW" || btn.name === "GREEN") ? '#000000' : '#ffffff';
+        displayCtx.font = 'bold 11px sans-serif';
+        displayCtx.textAlign = 'center';
+        displayCtx.textBaseline = 'middle';
+
+        let label = btn.name.slice(0, 4);
+        if (btn.type === "size") label = `${brushThickness}px`;
+        displayCtx.fillText(label, (btn.x1 + btn.x2) / 2, 33);
+
+        if (isSelected) {
+          displayCtx.strokeStyle = '#ffffff';
+          displayCtx.lineWidth = 3;
+          displayCtx.strokeRect(btn.x1 - 1, 6, (btn.x2 - btn.x1) + 2, 54);
+        }
+      });
+
+      // 4. Render Bottom HUD Bar
+      displayCtx.fillStyle = modeColor;
+      displayCtx.font = 'bold 12px sans-serif';
+      displayCtx.textAlign = 'left';
+      displayCtx.fillText(`MODE: ${mode} | TOOL: ${currentToolName} (${brushThickness}px)`, 14, displayCanvas.height - 14);
+
+      // 5. Render Notification Pill
+      if (notificationTimer > 0) {
+        notificationTimer--;
+        const textWidth = displayCtx.measureText(notificationText).width;
+        const pillW = textWidth + 30;
+        const pillX = (displayCanvas.width - pillW) / 2;
+        displayCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        displayCtx.fillRect(pillX, TOOLBAR_HEIGHT + 10, pillW, 30);
+        displayCtx.strokeStyle = '#38bdf8';
+        displayCtx.lineWidth = 1;
+        displayCtx.strokeRect(pillX, TOOLBAR_HEIGHT + 10, pillW, 30);
+        displayCtx.fillStyle = '#38bdf8';
+        displayCtx.font = '12px sans-serif';
+        displayCtx.textAlign = 'center';
+        displayCtx.fillText(notificationText, displayCanvas.width / 2, TOOLBAR_HEIGHT + 28);
+      }
+    }
+
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({ image: videoElement });
+      },
+      width: 640,
+      height: 480
+    });
+
+    camera.start().catch(err => {
+      console.error(err);
+      loadingStatus.innerText = "Camera access denied or unavailable!";
+      loadingStatus.style.color = "#ef4444";
+    });
+  </script>
+</body>
+</html>
